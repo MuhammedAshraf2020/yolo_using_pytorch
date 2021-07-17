@@ -1,71 +1,86 @@
 import torch.nn as nn
-import torch
+import torch 
 
-architecture_config = [
-    (7, 64, 2, 3),
-    "M",
-    (3, 192, 1, 1),
-    "M",
-    (1, 128, 1, 0),
-    (3, 256, 1, 1),
-    (1, 256, 1, 0),
-    (3, 512, 1, 1),
-    "M",
-    [(1, 256, 1, 0), (3, 512, 1, 1), 4],
-    (1, 512, 1, 0),
-    (3, 1024, 1, 1),
-    "M",
-    [(1, 512, 1, 0), (3, 1024, 1, 1), 2],
-]
+arch = [
+		[128 , 256  , 1 ,  0] ,
+		[256 , 512  , 1 ,  1] ,
+		[265 , 512  , 4 ,  0] ,
+		[512 , 1024 , 1 ,  1] ,
+		[512 , 1024 , 2 ,  1] ]
+
 
 class DarkLayer(nn.Module):
-	def __init__(self , in_channels , out_channels , **kwargs):
-		super(DarkLayer , self).__init__()
-		self.Conv2D    = nn.Conv2d(in_channels , out_channels , bias = False , **kwargs)
-		self.BatchNorm2d = nn.BatchNorm2d(out_channels)
-		self.leakyrelu = nn.LeakyReLU(0.1)
+  def __init__(self , in_layer , out_layer , kernel_size  , stride , padding , bias = False):
+    super(DarkLayer , self).__init__()
+    self.layer = nn.Sequential(
 
+				nn.Conv2d(in_channels = in_layer , out_channels = out_layer , 
+							 kernel_size = kernel_size , stride = stride , padding = padding , bias = bias) ,
+				
+				nn.BatchNorm2d(out_layer) ,
+				nn.LeakyReLU(0.1)    ,
+			)
+  def forward(self , x):
+			return self.layer(x)
+
+class Darkbox(nn.Module):
+	def __init__(self  , in1  , out1 , out2):
+		super(Darkbox , self).__init__()
+		self.model = nn.Sequential(
+				DarkLayer(in_layer = in1  , out_layer = out1 , kernel_size = 1 , stride = 1 , padding =  0 ) ,
+				DarkLayer(in_layer = out1 , out_layer = out2 , kernel_size = 3 , stride = 1 , padding =  1 ) , 
+			)
 	def forward(self , x):
-		return self.leakyrelu(self.BatchNorm2d(self.Conv2D(x)))
+		return self.model(x)
 
-class Yolov1(nn.Module):
-	def __init__(self , in_channels = 3 , **kwargs):
-		super(Yolov1 , self).__init__()
-		self.architecture = architecture_config
-		self.in_channels  = in_channels
-		self.darknet      = self.create_body(self.architecture)
-		self.fcs          = self.create_tail(**kwargs)
 
-	def forward(self , x):
-		return self.fcs(torch.flatten(self.darknet(x) , start_dim = 1))
 
-	def create_body(self , architecture):
-		layers = []
-		in_channels = self.in_channels
-		for x in architecture:
-			T = type(x)
-			# if its single layer then add it
-			if T == tuple:
-				layers += [DarkLayer(in_channels , x[1] , kernel_size = x[0] , stride = x[2] , padding = x[3])]
-				in_channels = x[1]
-			# if its string then its maxpooling
-			elif T == str:
-				layers += [nn.MaxPool2d(kernel_size = (2 , 2) , stride = (2 , 2))]
-			# if its some of layers loop through every one
-			elif T == list:
-				conv1    = x[0]
-				conv2    = x[1]
-				num_iter = x[2]
-				for iter in range(num_iter):
-					layers += [DarkLayer(in_channels , conv1[1] , kernel_size = conv1[0] , stride = conv1[2] , padding = conv1[3])]
-					layers += [DarkLayer(conv1[1] , conv2[1] , kernel_size = conv2[0] , stride = conv2[2] , padding = conv2[3])]
-					in_channels = conv2[1]
+class Darknet(nn.Module):
+  def __init__(self , S = 7 , B = 2 , C = 20):
+    super(Darknet , self).__init__()
+    self.B = B
+    self.C = C
+    self.S = S
+    self.initial_model      = nn.Sequential(
+				DarkLayer(in_layer = 3  , out_layer = 64  , kernel_size = 7 , stride = 2 , padding = 3 ) ,
+				DarkLayer(in_layer = 64 , out_layer = 192 , kernel_size = 3 , stride = 2 , padding = 1 ) ,
+			)
+    self.features_extractor = self.CreateBody()
+    self.model_tail         = self.CreateTail()
+  
+  def CreateBody(self):
+    layers = []
+    current_channels = 192
+    
+    for idx,  box in enumerate(arch):	
+      MaxPooling = box[3]
+      out_one    = arch[idx][0]
+      out_three  = arch[idx][1]
+    
+      for itr in range(box[2]):
+        layers.append(Darkbox(current_channels , out_one , out_three))
+        current_channels = out_three
+    
+      if MaxPooling == 1:
+        layers.append(nn.MaxPool2d(kernel_size = (2 , 2) , stride = (2 , 2)))
+    
+    layers.append(DarkLayer(in_layer = 1024 , out_layer = 1024 , kernel_size = 3 , stride = 1 , padding = 1))
+    layers.append(DarkLayer(in_layer = 1024 , out_layer = 1024 , kernel_size = 3 , stride = 2 , padding = 1))
+    layers.append(DarkLayer(in_layer = 1024 , out_layer = 1024 , kernel_size = 3 , stride = 1 , padding = 1))
+    layers.append(DarkLayer(in_layer = 1024 , out_layer = 1024 , kernel_size = 3 , stride = 1 , padding = 1))
+    return nn.Sequential(*layers)
 
-		return nn.Sequential(*layers)
-
-	def create_tail(self , S , B , C):
-		return nn.Sequential(nn.Flatten() , 
-							 nn.Linear(1024 * S * S , 496) ,
-							 nn.Dropout(0.3) ,
-							 nn.LeakyReLU(0.1) ,
-							 nn.Linear(496 , S * S * ( C + B * 5)))
+  def CreateTail(self):
+    return nn.Sequential(
+	 			nn.Linear(1024 * self.S * self.S , 496),
+	 			nn.Dropout(0.3),
+	 			nn.LeakyReLU(0.1),
+	 			nn.Linear(496 , self.S * self.S * (5 * self.B + self.C))
+	 		)
+  def forward(self , x):
+    x = self.initial_model(x)
+    x = self.features_extractor(x)
+    #print(x.shape)
+    x = torch.flatten(x)
+    #print(x.shape)
+    return self.model_tail(x)
